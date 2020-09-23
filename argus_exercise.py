@@ -11,10 +11,25 @@ class ArgusExercise(ArgusExerciseInterface):
     abstract methods.
     """
 
+    #constants
+    SPEEDOMETER = "0x100"
+    PEDALS = "0x200"
+    ABS = "0x400"
+    TIRE_PRESSURE = "0x800"
+   
+
+    #unit name with hex value
     UNITS = {"speedometer": "0x100",
              "pedals": "0x200",
              "abs": "0x400",
              "tire_pressure": "0x800"}
+    
+    #function to opwn and read the file
+    def openFile(self, file_path):
+        with open(file_path) as fp:
+            lines = fp.readlines()
+        return lines
+
 
     def detect_timing_anomalies(self, file_path):
         """
@@ -32,32 +47,36 @@ class ArgusExercise(ArgusExerciseInterface):
         """
 
         # read file
-        with open(file_path) as fp:
-            lines = fp.readlines()
-
-        indicies = []
-
+        lines = ArgusExercise.openFile(self, file_path)
+        
+        # list that holds the anomalies
+        anomalies = []
+        
+        # init units dicanary key -> ecuID and vlaue -> None to save the last record in each unit
         units_last_record = {unit: None for unit in
                              ArgusExercise.UNITS.values()}
-
-        units_freq = {"0x100": 50, "0x200": 5,
+        
+        #units frequency in timing anomaly
+        units_frequency = {"0x100": 50, "0x200": 5,
                       "0x400": 10, "0x800": 100}
 
         for line in lines:
-            index, timestamp, ID, value1, value2 = line.strip().split()
+            index, timestamp, ecuID, value1, value2 = line.strip().split()
 
-            # type conversion
+            # type conversion to time and index
             timestamp, index = int(timestamp), int(index)
-
-            if units_last_record[ID] is None:
-                units_last_record[ID] = timestamp
-
+            
+            # if the unit is None save the last timestamp to the dictionary
+            if units_last_record[ecuID] is None:
+                units_last_record[ecuID] = timestamp
+            
+            # else if the ecu unit already have a timestamp check if there is anomaly
             else:
-                if timestamp - units_last_record[ID] < units_freq[ID]:
-                    indicies.append(index)
-                units_last_record[ID] = timestamp
+                if timestamp - units_last_record[ecuID] < units_frequency[ecuID]:
+                    anomalies.append(index)
+                units_last_record[ecuID] = timestamp
 
-        return indicies
+        return anomalies
 
     def detect_behavioral_anomalies(self, file_path):
         """
@@ -74,55 +93,64 @@ class ArgusExercise(ArgusExerciseInterface):
         """
 
         # read file
-        with open(file_path) as fp:
-            lines = fp.readlines()
+        lines = ArgusExercise.openFile(self,file_path)
+        
+        # set that holds the anomalies
+        anomalies = set()
 
-        indicies = set()
-
+        # init units dicanary key -> ecuID and vlaue -> None to save the last record in each unit
         units_last_record = {unit: None for unit in
                              ArgusExercise.UNITS.values()}
-
+        
+        #units range by specific unit
         units_range = {"0x100": ((0, 0), (0, 300)),
                        "0x200": ((0, 100), (0, 100)),
                        "0x400": ((0, 0), (0, 1)),
                        "0x800": ((0, 0), (0, 100))}
+        
+        # crash flag init to false
+        crash = False
 
-        crash, pressed_for = False, [[0, 10], [0, 10]]
+        #pedals pressed range
+        pressed_for =  [[0, 10], [0, 10]]
 
         for line in lines:
-            index, timestamp, ID, value1, value2 = line.strip().split()
+            index, timestamp, ecuID, value1, value2 = line.strip().split()
 
             # type conversion
             index, timestamp, value1, value2 = map(int, (index, timestamp,
                                                          value1, value2))
-
-            l1, l2 = units_range[ID][0]
-            h1, h2 = units_range[ID][1]
+            
+            # init lower and upper ranges
+            lowerRange1, lowerRange2 = units_range[ecuID][0]
+            upperRange1, upperRange2 = units_range[ecuID][1]
 
             # range anomaly 1
-            if not l1 <= value1 or not value1 <= l2:
-                indicies.add(index)
+            if not lowerRange1 <= value1 or not value1 <= lowerRange2:
+                anomalies.add(index)
 
             # range anomaly 2
-            if not h1 <= value2 or not value2 <= h2:
-                indicies.add(index)
+            if not upperRange1 <= value2 or not value2 <= upperRange2:
+                anomalies.add(index)
 
             # pedal
-            if ID == "0x200":
+            if ecuID == self.PEDALS:
 
-                # gas and brakes
+                # if gas and brakes pressed simultaneously
                 if value1 * value2 != 0:
-                    indicies.add(index)
+                    anomalies.add(index)
 
-                # press duration
+                #check press duration
                 for n, v in enumerate((value1, value2)):
 
                     if v == 0:
-
+                        
+                        # calculating the delta time the pedals are pressed
                         delta = pressed_for[n][1] - pressed_for[n][0]
-
+                        
+                        #if the delta time is lower then 10 miliseconds add to anomaly
                         if delta < 10:
-                            indicies.add(index)
+                            anomalies.add(index)
                         pressed_for[n] = [0, 10]
 
                     else:
@@ -131,34 +159,35 @@ class ArgusExercise(ArgusExerciseInterface):
                         else:
                             pressed_for[n][1] = timestamp
 
-            # speed
-            if ID == "0x100":
+            # speedometer
+            if ecuID == self.SPEEDOMETER:
 
-                # check if crash
-                if crash:
-                    if value2 > 0:
-                        indicies.add(index)
-                        crash = False
+                # check if crash happened
+                if crash and value2 > 0:
+                    anomalies.add(index)
+                    crash = False
+                    
+                # checking if there is record in this unit
+                elif units_last_record[ecuID] is not None:
+                    
+                    # taking the last records
+                    prev_timestamp, prev_value1, prev_value2 = units_last_record[ecuID]
 
-                elif units_last_record[ID] is not None:
+                    # checking that car speed is not faster then 5kmh within 50 miliseconds
+                    if (timestamp - prev_timestamp <= 50 and
+                       abs(value2 - prev_value2) > 5):
 
-                    prev_tmp, prev_v1, prev_v2 = units_last_record[ID]
-
-                    # pedal pressing
-                    if (timestamp - prev_tmp <= 50 and
-                       abs(value2 - prev_v2) > 5):
-
-                        # register crash
+                        # register crash if value == 0 else add anomaly
                         if value2 == 0:
                             crash = True
                         else:
-                            indicies.add(index)
+                            anomalies.add(index)
                             pressed_for = [[0, 10], [0, 10]]
 
             # update the record
-            units_last_record[ID] = (timestamp, value1, value2)
+            units_last_record[ecuID] = (timestamp, value1, value2)
 
-        return sorted(list(indicies))
+        return sorted(list(anomalies))
 
     def detect_correlation_anomalies(self, file_path):
         """
@@ -175,67 +204,74 @@ class ArgusExercise(ArgusExerciseInterface):
         """
 
         # read file
-        with open(file_path) as fp:
-            lines = fp.readlines()
-
-        indicies = []
-
+        lines = ArgusExercise.openFile(self,file_path)
+        
+         # list that holds the anomalies
+        anomalies = []
+        
+        # dictionary that holds the last records
         units_last_record = {}
 
         for line in lines:
-            index, timestamp, ID, value1, value2 = line.strip().split()
+            index, timestamp, ecuID, value1, value2 = line.strip().split()
 
             # type conversion
             index, timestamp, value1, value2 = map(int, (index, timestamp,
                                                          value1, value2))
 
             # accelaration and brake correlations
-            if ID == "0x100":
+            if ecuID == self.SPEEDOMETER:
 
                 # accelaration
-                if "0x200" in units_last_record and "0x100" in units_last_record:
+                if self.PEDALS in units_last_record and self.SPEEDOMETER in units_last_record:
 
-                    _, acc, dec = units_last_record["0x200"]
-                    _, _, speed = units_last_record["0x100"]
+                    _, accelaration, brakes = units_last_record[self.PEDALS]
+                    _, _, speed = units_last_record[self.SPEEDOMETER]
+                    
+                    # checking if accelaration is actice and speed should not decrease
+                    if accelaration > 0 and value2 - speed < 0:
+                        anomalies.append(index)
+                    
+                    # if brakes are active and the speed should not increase
+                    elif brakes > 0 and value2 - speed > 0:
+                        anomalies.append(index)
 
-                    if acc > 0 and value2 - speed < 0:
-                        indicies.append(index)
+                # tire pressure (flat tire) check
+                if self.TIRE_PRESSURE in units_last_record:
 
-                    elif dec > 0 and value2 - speed > 0:
-                        indicies.append(index)
-
-                # pressure (flat tire)
-                if "0x800" in units_last_record:
-
-                    _, _, pressure = units_last_record["0x800"]
-
+                    _, _, pressure = units_last_record[self.TIRE_PRESSURE]
+                    
+                    # check if tire pressure is below 30 and speed is above 50kmh add anomaly
                     if pressure < 30 and value2 > 50:
-                        indicies.append(index)
+                        anomalies.append(index)
 
-            # ABS check
-            if ID == "0x400":
+            # ABS check of a brake pedal is pressed hard
+            if ecuID == self.ABS:
 
-                if "0x200" in units_last_record:
+                if self.PEDALS in units_last_record:
 
-                    _, acc, dec = units_last_record["0x200"]
+                    _, accelaration, brakes = units_last_record[self.PEDALS]
+                    
+                    # check if brakes hard pressed(80+) and value 2 is 0 add anomaly
+                    if value2 == 0 and brakes >= 80:
+                        anomalies.append(index)
 
-                    if value2 == 0 and dec >= 80:
-                        indicies.append(index)
+            # tire pressure while moving
+            if ecuID == self.TIRE_PRESSURE:
 
-            # pressure while moving
-            if ID == "0x800":
+                if self.SPEEDOMETER in units_last_record and self.TIRE_PRESSURE in units_last_record:
 
-                if "0x100" in units_last_record and "0x800" in units_last_record:
-
-                    _, _, speed = units_last_record["0x100"]
-                    _, _, pressure = units_last_record["0x800"]
-
+                    _, _, speed = units_last_record[self.SPEEDOMETER]
+                    _, _, pressure = units_last_record[self.TIRE_PRESSURE]
+                    
+                    
                     if (value2-pressure) > 0 and speed > 0:
-                        indicies.append(index)
-
+                        anomalies.append(index)
+                    
+                    # check if tire pressure below 30 and speed above 50kmh add anomaly
                     elif value2 < 30 and speed > 50:
-                        indicies.append(index)
+                        anomalies.append(index)
 
-            units_last_record[ID] = [timestamp, value1, value2]
+            units_last_record[ecuID] = [timestamp, value1, value2]
 
-        return indicies
+        return anomalies
